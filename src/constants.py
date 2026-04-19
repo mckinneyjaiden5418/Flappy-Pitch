@@ -26,15 +26,22 @@ COLOR_GREEN: Final[tuple[int, int, int]] = (92, 184, 92)
 COLOR_RED: Final[tuple[int, int, int]] = (220, 53, 69)
 COLOR_GOLD: Final[tuple[int, int, int]] = (255, 193, 7)
 COLOR_TEXT_MUTED: Final[tuple[int, int, int]] = (120, 120, 120)
+COLOR_SETTINGS_BG: Final[tuple[int, int, int, int]] = (20, 20, 30, 210)
+COLOR_SETTINGS_SELECTED: Final[tuple[int, int, int]] = (255, 193, 7)
+COLOR_SETTINGS_ITEM: Final[tuple[int, int, int]] = (210, 210, 210)
+COLOR_SETTINGS_BORDER: Final[tuple[int, int, int]] = (80, 80, 100)
 
 # Staff layout
 STAFF_TOP: Final[int] = 100
 STAFF_BOTTOM: Final[int] = 400
-STAFF_LINE_COUNT: Final[int] = 5
 
-# MIDI pitch range shown on screen
-MIDI_MIN: Final[int] = 45  # A2
-MIDI_MAX: Final[int] = 75  # D#5
+# Bb transposition offset
+BB_TRANSPOSE: Final[int] = 2
+
+# MIDI pitch range shown on screen (concert pitch).
+# Written range for trumpet: E3–C6.
+MIDI_MIN: Final[int] = 50  # concert D3
+MIDI_MAX: Final[int] = 84  # concert C6
 
 # Pipe
 PIPE_WIDTH: Final[int] = 60
@@ -49,14 +56,3 @@ BIRD_LERP: Final[float] = 0.12  # smoothing factor toward target pitch Y
 # Scoring
 SCORE_X: Final[int] = 20
 SCORE_Y: Final[int] = 20
-
-# Keyboard note mapping: key -> (note name, MIDI number)
-KEY_NOTE_MAP: Final[dict[str, tuple[str, int]]] = {
-    "a": ("C3", 48),
-    "s": ("E3", 52),
-    "d": ("G3", 55),
-    "f": ("C4", 60),
-    "g": ("E4", 64),
-    "h": ("G4", 67),
-    "j": ("C5", 72),
-}

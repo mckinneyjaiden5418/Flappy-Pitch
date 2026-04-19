@@ -9,7 +9,6 @@ from src.bird import Bird
 from src.constants import (
     COLOR_SKY,
     FPS,
-    KEY_NOTE_MAP,
     MIDI_MAX,
     MIDI_MIN,
     PIPE_SPAWN_INTERVAL,
@@ -20,7 +19,7 @@ from src.constants import (
 from src.hud import HUD
 from src.pipe import Pipe
 from src.staff import Staff
-from src.utils.mic import MicDetector
+from src.utils.mic import MicDetector, query_input_devices
 from src.utils.pitch import clamp_midi, freq_to_midi, midi_to_name, midi_to_y
 
 _MIN_AUDIBLE_FREQ: Final[float] = 80.0
@@ -33,6 +32,7 @@ class GameState(Enum):
     IDLE = auto()
     PLAYING = auto()
     DEAD = auto()
+    SETTINGS = auto()
 
 
 class Game:
@@ -55,11 +55,17 @@ class Game:
         self._best: int = 0
         self._frame: int = 0
 
-        self._held_keys: set[str] = set()
-        self._mic_mode: bool = False
         self._mic: MicDetector = MicDetector()
-
         self._active_note: str | None = None
+
+        self._settings_devices: list[tuple[int, str]] = []
+        self._settings_selected: int = 0
+        self._state_before_settings: GameState = GameState.IDLE
+
+        try:
+            self._mic.start()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -86,48 +92,86 @@ class Game:
             elif event.type == pygame.KEYDOWN:
                 self._on_key_down(event.key)
 
-            elif event.type == pygame.KEYUP:
-                key: str = pygame.key.name(event.key).lower()
-                self._held_keys.discard(key)
-
     def _on_key_down(self, key_code: int) -> None:
         """React to a key press event.
 
         Args:
             key_code (int): pygame key constant.
         """
+        if self._state == GameState.SETTINGS:
+            self._on_settings_key(key_code)
+            return
+
         key: str = pygame.key.name(key_code).lower()
 
-        if key == "m":
-            self._toggle_mic()
+        if key == "s":
+            self._open_settings()
             return
 
         if key == "r":
             self._reset()
             return
 
-        if key in KEY_NOTE_MAP and not self._mic_mode:
-            self._held_keys.add(key)
-            if self._state in (GameState.IDLE, GameState.DEAD):
-                self._reset()
+    def _on_settings_key(self, key_code: int) -> None:
+        """Handle key input while in the SETTINGS state.
+
+        Args:
+            key_code (int): pygame key constant.
+        """
+        if key_code == pygame.K_ESCAPE:
+            self._close_settings(confirm=False)
+
+        elif key_code in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._close_settings(confirm=True)
+
+        elif key_code == pygame.K_UP:
+            self._settings_selected = max(0, self._settings_selected - 1)
+
+        elif key_code == pygame.K_DOWN:
+            self._settings_selected = min(
+                len(self._settings_devices) - 1,
+                self._settings_selected + 1,
+            )
 
     # ------------------------------------------------------------------
-    # Internal — mic
+    # Internal — settings
     # ------------------------------------------------------------------
 
-    def _toggle_mic(self) -> None:
-        """Toggle between keyboard and microphone input modes."""
-        if self._mic_mode:
-            self._mic.stop()
-            self._mic_mode = False
-        else:
-            try:
-                self._mic.start()
-                self._mic_mode = True
-                if self._state in (GameState.IDLE, GameState.DEAD):
-                    self._reset()
-            except Exception:  # noqa: BLE001
-                pass  # Mic unavailable; stay in keyboard mode
+    def _open_settings(self) -> None:
+        """Load input devices and transition to the SETTINGS state."""
+        try:
+            self._settings_devices = query_input_devices()
+        except Exception:  # noqa: BLE001
+            return
+
+        if not self._settings_devices:
+            return
+
+        active: int = self._mic.device
+        self._settings_selected = next(
+            (i for i, (idx, _) in enumerate(self._settings_devices) if idx == active),
+            0,
+        )
+
+        self._state_before_settings = self._state
+        self._state = GameState.SETTINGS
+
+    def _close_settings(self, *, confirm: bool) -> None:
+        """Exit the SETTINGS state, optionally applying the selected device.
+
+        Args:
+            confirm (bool): If True, restart the mic with the selected device.
+                If False, discard the selection and return unchanged.
+        """
+        if confirm and self._settings_devices:
+            new_device: int = self._settings_devices[self._settings_selected][0]
+            if new_device != self._mic.device:
+                try:
+                    self._mic.restart(new_device)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self._state = self._state_before_settings
 
     # ------------------------------------------------------------------
     # Internal — game logic
@@ -144,34 +188,10 @@ class Game:
         self._pipes.append(Pipe(gap_center_y=Pipe.random_gap_center()))
 
     def _get_target_y(self) -> float | None:
-        """Determine the bird's target Y from the active input source.
+        """Determine the bird's target Y from the microphone pitch detector.
 
         Returns:
-            float | None: Target Y in pixels, or None if no note is active.
-        """
-        if self._mic_mode:
-            return self._get_mic_target_y()
-        return self._get_keyboard_target_y()
-
-    def _get_keyboard_target_y(self) -> float | None:
-        """Return target Y from the currently held keyboard note.
-
-        Returns:
-            float | None: Target Y, or None if no note key is held.
-        """
-        for key in KEY_NOTE_MAP:
-            if key in self._held_keys:
-                note_name, midi = KEY_NOTE_MAP[key]
-                self._active_note = note_name
-                return midi_to_y(midi)
-        self._active_note = None
-        return None
-
-    def _get_mic_target_y(self) -> float | None:
-        """Return target Y from the microphone pitch detector.
-
-        Returns:
-            float | None: Target Y, or None if pitch is inaudible.
+            float | None: Target Y in pixels, or None if pitch is inaudible.
         """
         freq: float = self._mic.frequency
         if freq < _MIN_AUDIBLE_FREQ or freq > _MAX_AUDIBLE_FREQ:
@@ -193,16 +213,13 @@ class Game:
         if target_y is not None:
             self._bird.set_target(target_y)
         else:
-            # Drift downward slowly when silent
             self._bird.set_target(self._bird.y + 3)
 
         self._bird.update()
 
-        # Spawn pipes
         if self._frame % PIPE_SPAWN_INTERVAL == 0:
             self._pipes.append(Pipe(gap_center_y=Pipe.random_gap_center()))
 
-        # Update pipes, check scoring and collision
         for pipe in self._pipes:
             pipe.update()
             if not pipe.scored and pipe.x + 60 < self._bird.x:
@@ -232,22 +249,28 @@ class Game:
 
         self._bird.draw(self._screen)
 
-        mode_label: str = "mic" if self._mic_mode else "keyboard"
         self._hud.draw_score(self._screen, self._score, self._best)
-        self._hud.draw_note(self._screen, self._active_note, mode_label)
-        self._hud.draw_keybinds(self._screen)
+        self._hud.draw_note(self._screen, self._active_note)
+        self._hud.draw_hint_bar(self._screen, "R = restart  |  S = mic device")
 
         if self._state == GameState.IDLE:
             self._hud.draw_overlay(
                 self._screen,
                 "Flappy Pitch",
-                "Hold a key to fly  |  R to restart  |  M to toggle mic",
+                "Hum or sing to fly  |  R = start  |  S = mic device",
             )
         elif self._state == GameState.DEAD:
             self._hud.draw_overlay(
                 self._screen,
                 f"Score: {self._score}",
-                "R to play again  |  M to toggle mic",
+                "R = play again  |  S = mic device",
+            )
+        elif self._state == GameState.SETTINGS:
+            self._hud.draw_settings_overlay(
+                self._screen,
+                self._settings_devices,
+                self._settings_selected,
+                self._mic.device,
             )
 
         pygame.display.flip()
@@ -258,7 +281,6 @@ class Game:
 
     def _quit(self) -> None:
         """Clean up resources and exit the application."""
-        if self._mic_mode:
-            self._mic.stop()
+        self._mic.stop()
         pygame.quit()
         raise SystemExit

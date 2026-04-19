@@ -9,6 +9,28 @@ MIN_FREQ: Final[float] = 80.0
 MAX_FREQ: Final[float] = 1200.0
 POLL_INTERVAL: Final[float] = 0.03  # seconds
 
+_DEFAULT_DEVICE: Final[int] = 2  # HyperX QuadCast 2 (MME index)
+
+
+def query_input_devices() -> list[tuple[int, str]]:
+    """Return all available audio input devices as (index, name) pairs.
+
+    Only devices with at least one input channel are included.
+
+    Returns:
+        list[tuple[int, str]]: Ordered list of (device_index, device_name).
+
+    Raises:
+        ImportError: If sounddevice is not installed.
+    """
+    import sounddevice as sd  # type: ignore[import]
+
+    devices: list[tuple[int, str]] = []
+    for i, info in enumerate(sd.query_devices()):
+        if info["max_input_channels"] > 0:  # type: ignore[index]
+            devices.append((i, info["name"]))  # type: ignore[index]
+    return devices
+
 
 def _autocorrelate(buf: list[float], sample_rate: int) -> float:
     """Estimate fundamental frequency from a buffer using autocorrelation.
@@ -77,48 +99,34 @@ def _autocorrelate(buf: list[float], sample_rate: int) -> float:
 
 
 class MicDetector:
-    """Continuously detects pitch from the default microphone in a background thread."""
+    """Continuously detects pitch from a microphone input in a background thread."""
 
-    def __init__(self) -> None:
-        """Initialise the detector (does not start the stream yet)."""
+    def __init__(self, device: int = _DEFAULT_DEVICE) -> None:
+        """Initialise the detector with a chosen device index.
+
+        Does not open the stream until :meth:`start` is called.
+
+        Args:
+            device (int): sounddevice device index to use. Defaults to the
+                HyperX QuadCast 2 (index 2, MME).
+        """
+        self._device: int = device
         self._freq: float = -1.0
         self._lock: threading.Lock = threading.Lock()
         self._running: bool = False
-        self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        """Open the microphone stream and begin pitch detection.
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-        Raises:
-            ImportError: If sounddevice or numpy is not installed.
-            RuntimeError: If the microphone cannot be opened.
+    @property
+    def device(self) -> int:
+        """Currently configured device index.
+
+        Returns:
+            int: sounddevice device index.
         """
-        import sounddevice as sd  # type: ignore[import]
-        import numpy as np  # type: ignore[import]
-
-        self._running = True
-
-        def _callback(indata: "np.ndarray", frames: int, time: object, status: object) -> None:  # noqa: ARG001
-            samples: list[float] = indata[:, 0].tolist()
-            freq: float = _autocorrelate(buf=samples, sample_rate=44100)
-            with self._lock:
-                self._freq = freq
-
-        self._stream = sd.InputStream(
-            samplerate=44100,
-            channels=1,
-            blocksize=4096,
-            callback=_callback,
-            device=2, # 2 = Quadcast (MME). Hardcoded rn changing later.
-        )
-        self._stream.start()
-
-    def stop(self) -> None:
-        """Stop the microphone stream."""
-        self._running = False
-        if hasattr(self, "_stream"):
-            self._stream.stop()
-            self._stream.close()
+        return self._device
 
     @property
     def frequency(self) -> float:
@@ -129,3 +137,65 @@ class MicDetector:
         """
         with self._lock:
             return self._freq
+
+    def start(self) -> None:
+        """Open the microphone stream and begin pitch detection.
+
+        Args:
+            None
+
+        Raises:
+            ImportError: If sounddevice or numpy is not installed.
+            RuntimeError: If the microphone cannot be opened.
+        """
+        import sounddevice as sd  # type: ignore[import]
+
+        self._running = True
+
+        def _callback(
+            indata: "object",
+            frames: int,  # noqa: ARG001
+            time: object,  # noqa: ARG001
+            status: object,  # noqa: ARG001
+        ) -> None:
+            import numpy as np  # type: ignore[import]
+
+            samples: list[float] = indata[:, 0].tolist()  # type: ignore[index]
+            freq: float = _autocorrelate(buf=samples, sample_rate=44100)
+            with self._lock:
+                self._freq = freq
+
+        self._stream = sd.InputStream(
+            samplerate=44100,
+            channels=1,
+            blocksize=4096,
+            callback=_callback,
+            device=self._device,
+        )
+        self._stream.start()
+
+    def stop(self) -> None:
+        """Stop the microphone stream and reset the detected frequency."""
+        self._running = False
+        if hasattr(self, "_stream"):
+            self._stream.stop()
+            self._stream.close()
+        with self._lock:
+            self._freq = -1.0
+
+    def restart(self, device: int) -> None:
+        """Switch to a different input device.
+
+        Stops the current stream (if running), updates the device index,
+        and starts a new stream immediately.
+
+        Args:
+            device (int): New sounddevice device index.
+
+        Raises:
+            ImportError: If sounddevice or numpy is not installed.
+            RuntimeError: If the new device cannot be opened.
+        """
+        self.stop()
+        self._device = device
+        self.start()
